@@ -1,125 +1,92 @@
-<div align="center">
+# FSD Path Planner
 
-# 🏎️ FSD Path Planner
+A ROS 1 node that plans a path through a cone-delimited track and outputs steering and speed commands.
 
-**라바콘 트랙을 위한 하이브리드 경로 계획 + Pure Pursuit 제어 ROS 노드**
+It extracts the track centerline with Delaunay triangulation and Voronoi vertices, generates multiple smoothed candidate paths, selects one with a cost function, falls back to RRT\* when the centerline cannot be found, and tracks the result with a Kalman-filtered Pure Pursuit controller.
 
-Delaunay · Voronoi 중앙선 추출 → B-spline 다중 후보 경로 → 비용 기반 선택 → (실패 시) RRT\* 복구 → 칼만 필터 + Pure Pursuit 조향
+![main_node.py on a synthetic S-curve track](docs/demo.png)
 
-![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)
-![ROS](https://img.shields.io/badge/ROS-1%20(rospy)-22314E?logo=ros&logoColor=white)
-![NumPy](https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white)
-![SciPy](https://img.shields.io/badge/SciPy-8CAAE6?logo=scipy&logoColor=white)
+*`main_node.py` running on a synthetic S-curve track with ROS stubbed out. Reproduce with [`docs/make_demo.py`](docs/make_demo.py).*
 
-<img src="docs/demo.png" alt="가상 S자 트랙에서 main_node.py 실행 결과" width="100%">
+## Method
 
-<sub>가상 S자 콘 트랙에서 <code>main_node.py</code>를 실행한 결과 (ROS를 흉내 낸 오프라인 실행, <a href="docs/make_demo.py">docs/make_demo.py</a>로 재현 가능)</sub>
+1. **Filtering** – Cones outside the planning region of interest, and noise points right in front of the vehicle, are discarded.
+2. **Centerline extraction** – Midpoints of Delaunay edges are kept only if the edge length matches a plausible gate width, the edge crosses the direction of travel, and the adjacent triangles have a bounded circumradius. Voronoi vertices with enough clearance from the cones are added.
+3. **Ordering** – Points are ordered greedily from the vehicle, with limits on step distance and heading change.
+4. **Candidate paths** – The ordered points are smoothed with a B-spline, and laterally offset copies are created (11 by default).
+5. **Selection** – Each candidate is scored on obstacle clearance, curvature, smoothness, consistency with the previous path, and steering continuity. The previous choice is favored, and the result is blended with the previous path.
+6. **Fallback** – If no centerline is found, a midline-guided RRT\* (`ma_rrt.py`) searches for a path.
+7. **Control** – A speed limit is derived from path curvature. The lookahead target is smoothed by a Kalman filter, and steering is computed by Pure Pursuit with a curvature feed-forward term, followed by rate limiting and low-pass filtering.
+8. **Failure handling** – When planning fails, the previous steering is held at reduced speed. After 15 consecutive failures, the node commands a stop.
 
-</div>
-
----
-
-## ✨ 주요 기능
-
-| | 기능 | 설명 |
-|---|---|---|
-| 🔺 | **Delaunay + Voronoi 중앙선** | 콘 삼각분할의 게이트 폭·외접원·진행방향 조건으로 유효한 중점만 고르고, Voronoi 꼭짓점으로 안전 공간을 보강 |
-| 🌈 | **다중 후보 경로** | 기준 경로를 B-spline으로 부드럽게 만든 뒤 좌우로 오프셋한 후보 11개를 생성 |
-| ⚖️ | **비용 기반 선택** | 충돌·곡률·부드러움·이전 경로 일관성·조향 연속성을 합산해 최적 경로 선택 (이전 선택에 가산점) |
-| 🌲 | **RRT\* 복구** | 중앙선을 못 찾으면 중점을 가이드로 쓰는 RRT\*(`ma_rrt.py`)로 경로를 새로 탐색 |
-| 🎯 | **칼만 필터 + Pure Pursuit** | 목표점을 KF로 안정화하고, 속도에 비례한 동적 lookahead와 곡률 피드포워드로 조향 계산 |
-| 🛡️ | **안전 장치** | 조향·속도 변화율 제한, 저역 통과 필터, 콘 소실 시 이전 조향 유지 → 15프레임 이상 지속 시 비상 정지 |
-| 📊 | **실시간 텔레메트리** | `plotter_node.py`가 속도·조향·신뢰도·경로를 matplotlib 대시보드로 표시 |
-
-## 🧭 처리 흐름
-
-```mermaid
-flowchart LR
-    A["/center_points<br/>(콘 좌표)"] --> B[ROI · 노이즈 필터]
-    B --> C[Delaunay 중점<br/>+ Voronoi 꼭짓점]
-    C --> D[탐욕 정렬<br/>각도·거리 제한]
-    D --> E[B-spline 기준 경로<br/>+ 좌우 오프셋 후보]
-    D -- 중점 부족 --> R[RRT* 복구]
-    R --> F
-    E --> F[비용 평가 · 최적 경로 선택<br/>+ 이전 경로와 블렌딩]
-    F --> G[곡률 → 속도 상한]
-    G --> H[KF 목표점 + Pure Pursuit]
-    H --> I["/cone/steer<br/>/cone/speed<br/>/cone/confidence"]
-```
-
-## 📁 구성
+## Files
 
 ```
-.
-├── main_node.py          # 메인 플래너 + 제어 노드 (fsd_main_planner)
-├── ma_rrt.py             # 중앙선 가이드 RRT* (복구용)
-├── plotter_node.py       # 실시간 텔레메트리 대시보드
-├── test_planner.py       # fsd_path_planning 라이브러리 단독 테스트
-├── fsd_path_planning/    # 콘 정렬·매칭·경로 계산 라이브러리 (MIT, 아래 크레딧 참고)
-└── docs/
-    ├── demo.png          # README 데모 이미지
-    └── make_demo.py      # ROS 없이 데모 이미지를 다시 만드는 스크립트
+main_node.py         Planner and controller node (fsd_main_planner)
+ma_rrt.py            Midline-guided RRT* used as a fallback
+plotter_node.py      Real-time telemetry plot (speed, steering, confidence, path)
+test_planner.py      Standalone test of the fsd_path_planning library
+fsd_path_planning/   Cone sorting, matching and path calculation library (see Credits)
+docs/                Demo image and the script that generates it
 ```
 
-## 🔌 ROS 인터페이스
+## ROS interface
 
-**구독**
+Subscribed:
 
-| 토픽 | 타입 | 설명 |
+| Topic | Type | Description |
 |---|---|---|
-| `/center_points` | `visualization_msgs/Marker` | 차량 기준 좌표계의 콘 위치 (`points`) |
+| `/center_points` | `visualization_msgs/Marker` | Cone positions in the vehicle frame |
 
-**발행**
+Published:
 
-| 토픽 | 타입 | 설명 |
+| Topic | Type | Description |
 |---|---|---|
-| `/cone/steer` | `std_msgs/Float32` | 조향각 [deg], ±30° 제한 |
-| `/cone/speed` | `std_msgs/Int32` | 속도 명령 |
-| `/cone/confidence` | `std_msgs/Float32` | 경로 신뢰도 (정상 1.3 · RRT 0.8 · 짧은 경로 0.5 · 실패 0.2/0.0) |
-| `/fsd_planner/v_limit` | `std_msgs/Float32` | 곡률 기반 속도 상한 |
-| `/fsd_planner/max_k` | `std_msgs/Float32` | 전방 최대 곡률 |
-| `/fsd_planner/best_path` | `visualization_msgs/Marker` | 선택된 경로 (RViz) |
-| `/fsd_planner/candidate_paths` | `visualization_msgs/MarkerArray` | 후보 경로들 (RViz) |
-| `/fsd_planner/delaunay_viz` | `visualization_msgs/Marker` | 삼각분할 간선·중점 (RViz) |
-| `/fsd_planner/valid_cones` | `visualization_msgs/Marker` | ROI 내 유효 콘 (RViz) |
-| `/fsd_planner/target_point` | `visualization_msgs/Marker` | KF 보정된 추종 목표점 (RViz) |
+| `/cone/steer` | `std_msgs/Float32` | Steering angle in degrees, clipped to ±30 |
+| `/cone/speed` | `std_msgs/Int32` | Speed command |
+| `/cone/confidence` | `std_msgs/Float32` | Path confidence: 1.3 normal, 0.8 RRT, 0.5 short path, 0.2 / 0.0 on failure |
+| `/fsd_planner/v_limit` | `std_msgs/Float32` | Curvature-based speed limit |
+| `/fsd_planner/max_k` | `std_msgs/Float32` | Maximum curvature ahead |
+| `/fsd_planner/best_path` | `visualization_msgs/Marker` | Selected path |
+| `/fsd_planner/candidate_paths` | `visualization_msgs/MarkerArray` | All candidate paths |
+| `/fsd_planner/delaunay_viz` | `visualization_msgs/Marker` | Delaunay edges and midpoints |
+| `/fsd_planner/valid_cones` | `visualization_msgs/Marker` | Cones inside the region of interest |
+| `/fsd_planner/target_point` | `visualization_msgs/Marker` | Filtered Pure Pursuit target |
 
-## 🚀 실행
+## Usage
 
-ROS 1 catkin 패키지의 `src`(스크립트) 폴더로 쓰는 구성입니다. 패키지 이름은 환경에 맞게 바꿔 주세요.
+The files are meant to be placed in the scripts folder of a catkin package. Replace `<your_package>` with the package name.
 
 ```bash
 pip install numpy scipy matplotlib
-chmod +x main_node.py plotter_node.py
-
-rosrun <your_package> main_node.py      # 플래너 + 제어
-rosrun <your_package> plotter_node.py   # (선택) 텔레메트리 대시보드
+rosrun <your_package> main_node.py
+rosrun <your_package> plotter_node.py   # optional
 ```
 
-ROS 없이 알고리즘만 확인하려면:
+To run the planner without ROS on a synthetic track:
 
 ```bash
 python docs/make_demo.py . docs/demo.png
 ```
 
-## ⚙️ 주요 파라미터
+## Parameters
 
-`~private` 파라미터로 덮어쓸 수 있습니다. (예: `rosrun <pkg> main_node.py _target_speed:=90`)
+All parameters are private (`~name`) and can be set on the command line, e.g. `rosrun <your_package> main_node.py _target_speed:=90`.
 
-| 파라미터 | 기본값 | 설명 |
+| Parameter | Default | Description |
 |---|---|---|
-| `target_speed` / `min_speed` / `max_speed` | 100 / 80 / 120 | 목표·최소·최대 속도 |
-| `plan_distance` | 12.0 | 계획 거리 [m] |
-| `wheelbase` | 0.6 | 축거 [m] |
-| `min_gate_width` / `max_gate_width` | 2.8 / 5.5 | 유효한 좌우 콘 간격 [m] |
-| `num_paths` / `max_offset` | 11 / 1.3 | 후보 경로 수 / 최대 좌우 오프셋 [m] |
-| `w_collision` / `w_curvature` / `w_smoothness` / `w_consistency` | 150 / 5 / 30 / 30 | 비용 가중치 |
-| `min_ld` / `max_ld` | 1.0 / 4.0 | Pure Pursuit lookahead 범위 [m] |
-| `friction_mu` | 0.75 | 곡률 기반 속도 상한에 쓰는 마찰계수 |
-| `filter_alpha_steer` / `filter_alpha_ld` | 0.07 / 0.2 | 조향·lookahead 저역 통과 계수 |
+| `target_speed`, `min_speed`, `max_speed` | 100, 80, 120 | Speed command range |
+| `plan_distance` | 12.0 | Planning distance (m) |
+| `wheelbase` | 0.6 | Vehicle wheelbase (m) |
+| `min_gate_width`, `max_gate_width` | 2.8, 5.5 | Accepted distance between left and right cones (m) |
+| `num_paths`, `max_offset` | 11, 1.3 | Number of candidate paths and maximum lateral offset (m) |
+| `w_collision`, `w_curvature`, `w_smoothness`, `w_consistency` | 150, 5, 30, 30 | Cost weights |
+| `min_ld`, `max_ld` | 1.0, 4.0 | Pure Pursuit lookahead range (m) |
+| `friction_mu` | 0.75 | Friction coefficient for the curvature speed limit |
+| `filter_alpha_steer`, `filter_alpha_ld` | 0.07, 0.2 | Low-pass filter coefficients |
 
-전체 목록은 [`main_node.py`](main_node.py)의 `load_parameters()`를 참고하세요.
+See `load_parameters()` in [`main_node.py`](main_node.py) for the full list.
 
-## 🙏 크레딧
+## Credits
 
-- [`fsd_path_planning/`](fsd_path_planning)은 [papalotis/ft-fsd-path-planning](https://github.com/papalotis/ft-fsd-path-planning) (FaSTTUBe, MIT License)을 기반으로 수정한 코드입니다. 원본 라이선스는 [`fsd_path_planning/LICENSE`](fsd_path_planning/LICENSE)에 있습니다.
+[`fsd_path_planning/`](fsd_path_planning) is a modified copy of [papalotis/ft-fsd-path-planning](https://github.com/papalotis/ft-fsd-path-planning) by FaSTTUBe, released under the MIT License. The original license is included in [`fsd_path_planning/LICENSE`](fsd_path_planning/LICENSE).
