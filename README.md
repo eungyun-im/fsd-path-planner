@@ -4,6 +4,10 @@ A ROS 1 node that plans a path through a cone-delimited track and outputs steeri
 
 It extracts the track centerline with Delaunay triangulation and Voronoi vertices, generates multiple smoothed candidate paths, selects one with a cost function, falls back to RRT\* when the centerline cannot be found, and tracks the result with a Kalman-filtered Pure Pursuit controller.
 
+<p align="center"><img src="docs/run_2x.gif" alt="The car driving through the cone section" width="480"></p>
+
+*The node on the car in a cone section, 2x speed. Full-quality clip: [`docs/run_2x.mp4`](docs/run_2x.mp4).*
+
 ![main_node.py on a synthetic S-curve track](docs/demo.png)
 
 *`main_node.py` running on a synthetic S-curve track with ROS stubbed out. Reproduce with [`docs/make_demo.py`](docs/make_demo.py).*
